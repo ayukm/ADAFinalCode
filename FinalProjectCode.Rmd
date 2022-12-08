@@ -1,0 +1,160 @@
+---
+title: "ADAproject"
+output: html_document
+date: "2022-11-03"
+---
+# set up
+```{r setup, include=FALSE}
+library(ggplot2)
+library(tidyverse)
+library(plyr)
+library(dplyr)
+library(haven)
+library(VIM)
+library(table1)
+library(pacman)
+library(odds.n.ends)
+pacman::p_load(readr, nnet, MASS, funModeling, table1, mutlcomp)
+```
+
+## 1) Load dataset
+```{r}
+CHIS2017 <- read_sav("/Users/manyi-eyongayuk/Downloads/adult_2017_spss/ADULT.sav")
+```
+
+#2) Data Cleaning:
+# a) Separate out the variables i want because this dataset is HUGE
+
+```{r}
+CHIS2017 <- CHIS2017 %>%
+dplyr::select(c("AC100", "BMI_P", "SRSEX", "SRAGE_P1"))
+```
+# b) Let's check how much data is missing though
+
+```{r}
+md.pattern(CHIS2017, rotate.names=TRUE)
+table(CHIS2017$AC100, useNA="always")
+# two ways to look at it
+# no missing data :)
+```
+# c) Let's filter out the 184 people that answered "-1= inapplicable"
+```{r}
+CHIS2017 <- filter(CHIS2017, AC100 > -1)
+```
+
+# d) Recode BMI to an ordinal scale
+```{r}
+
+CHIS2017 <- CHIS2017 %>%
+  mutate(BMI_cat = case_when(BMI_P > 0 & BMI_P < 18.5 ~ 0,
+                             BMI_P >= 18.5 & BMI_P < 25 ~ 1,
+                             BMI_P >= 25 & BMI_P < 30 ~ 2,
+                             BMI_P >= 30 ~ 3)) %>%
+  mutate(BMI_cat = factor(BMI_cat, 0:3, c("Underweight", "Normal", "Overweight", "Obese"), ordered = T))
+
+```
+# e) Condense the age category because we really don't need that many
+```{r}
+CHIS2017 <- CHIS2017 %>%
+  mutate(AGE_cat = case_when(SRAGE_P1 >= 18 & SRAGE_P1 < 35 ~ 0,
+                             SRAGE_P1 >= 35 & SRAGE_P1 < 65 ~ 1,
+                             SRAGE_P1 >= 65 ~ 2))
+```
+
+# 3) Analysis
+# a) Execute an ordinal logistic regression with frequency of exercise in past 7 days  as the independent variable and BMI category as the dependent variable with age and gender as covariates. 
+```{r echo = FALSE, eval = FALSE}
+# unadjusted model
+model1<-polr(BMI_cat ~ AC100, Hess=TRUE, data=CHIS2017) 
+summary(model1)
+
+# adjusted model
+model2<-polr(BMI_cat ~ AGE_cat + SRAGE_P1 + AC100, Hess=TRUE, data=CHIS2017) 
+summary(model2)
+```
+
+# b) Get p-values
+```{r}
+ptable <- coef(summary(model1))
+# calculate and store p values
+p <- pnorm(abs(ptable[, "t value"]), lower.tail = FALSE) * 2
+p
+# combined table
+ptable <- cbind(ptable, "p value" = p)
+ptable
+# The effects of single marital status on stage at diagnosis was statistically significant with a p-value <0.001 using married as the reference category.
+```
+#c) Get odds ratios
+```{r}
+exp(cbind("Odds ratio" = coef(model1), confint.default(model1, level = 0.95)))
+exp(cbind("Odds ratio" = coef(model2), confint.default(model2, level = 0.95)))
+```
+
+# Interpretations
+## For every one unit increase in frequency of exercise, the odds of a being obese decreases by 0.91 times after adjusting for sex and age
+
+
+# 4) Testing the parallel regression/proportional odds assumption using Brant Test
+```{r}
+brant(model1)
+brant(model2)
+
+# The models do not satisfy the proportional odds assumption.
+```
+# 5) Switch to a multinomial logisitic regression :(
+#a) First, go back and make underweight and normal one category to make this easier for me to interpret.
+```{r}
+CHIS2017 <- CHIS2017 %>%
+  mutate(BMI = case_when(BMI_P > 0 & BMI_P < 25 ~ 0,
+                             BMI_P >= 25 & BMI_P < 30 ~ 1,
+                             BMI_P >= 30 ~ 2),
+         BMI = factor(BMI, 0:2, c("Underweight/Normal", "Overweight", "Obese")))
+```
+# b) Okay, now let's re-run the model
+```{r}
+#unadjusted
+model3 <- multinom(BMI ~ AC100, data=CHIS2017)
+summary(model3)
+tidy(model3, conf.int=TRUE, exponentiate = TRUE)
+
+#adjusted
+model4 <- multinom(BMI ~ AGE_cat + SRSEX +AC100, data=CHIS2017)
+summary(model4)
+tidy(model4, conf.int=TRUE, exponentiate = TRUE)
+
+
+```
+
+#6) DAG code
+```{r}
+testImplications <- function( covariance.matrix, sample.size ){
+	library(ggm)
+	tst <- function(i){ pcor.test( pcor(i,covariance.matrix), length(i)-2, sample.size )$pvalue }
+tos <- function(i){ paste(i,collapse=" ") }
+implications <- list(c("age","sex"))
+	data.frame( implication=unlist(lapply(implications,tos)),
+		pvalue=unlist( lapply( implications, tst ) ) )
+
+}
+```
+
+
+# 7) Table 1
+```{r}
+#Turn gender and age category into factors
+CHIS2017$SRSEX<-factor(CHIS2017$SRSEX,
+														levels = c(1, 2),
+														labels = c("Male", "Female"))
+CHIS2017$AGE_cat<-factor(CHIS2017$AGE_cat,
+														levels = c(0, 1, 2),
+														labels = c("18-34", "35-64", "65+"))
+
+table1(~AC100 + SRSEX + AGE_cat|BMI, CHIS2017)
+# add labels
+label(CHIS2017$SRSEX)<-"SELF-REPORTED SEX"
+label(CHIS2017$AGE_cat)<-"AGE CATEGORY"
+table1(~AC100 + SRSEX + AGE_cat|BMI, CHIS2017)
+
+```
+
+
